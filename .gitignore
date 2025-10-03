@@ -1,0 +1,39 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+venv/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
+# Logs
+*.log
+*.tmp
+*.toc
+*.manifest
+*.bak
+*.old
+
+# OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# IDE/editor
+.idea/
+.vscode/
+*.code-workspace
+
+# Project outputs (optionally ignore if you don’t want binaries in repo)
+dist/*.exe
+dist/ffmpeg.exe
+dist/ffprobe.exe
+
+
