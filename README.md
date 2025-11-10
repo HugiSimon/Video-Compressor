@@ -10,6 +10,7 @@ A small Windows GUI app (Tkinter + FFmpeg) to compress a single video. You can d
 - Toggle to keep or remove audio
 - Displays a maximum size estimate (upper bound) before compressing
 - Writes the output next to the source video (fallback to Downloads if needed)
+- Export to GIF while respecting the selected Resolution/FPS (bitrate is ignored for GIF)
 
 ### Requirements
 - To run the compiled EXE:
@@ -47,6 +48,7 @@ pyinstaller --name VideoCompressor --onefile --noconsole compressor_gui.py
 ### How it works (brief)
 - The app estimates an upper-bound output size using: size ≈ duration × (total kb/s) / 8, with a safety margin and capped video bitrate (x264 CBR-like via `-maxrate`/`-bufsize`) and 128 kb/s audio when audio is kept.
 - Output is written to the same directory as the input video. If the app can’t write there, it falls back to the user’s Downloads folder.
+- For GIF exports, a dedicated FFmpeg palette workflow is used (`palettegen`/`paletteuse`). The bitrate slider does not apply to GIF; control size/quality using Resolution and FPS. The shown size estimate for GIF is heuristic (based on frames and pixels) and provided for guidance.
 
 ### Troubleshooting
 - “FFmpeg not available”: place `ffmpeg.exe` and `ffprobe.exe` next to `VideoCompressor.exe`, or install FFmpeg and add it to PATH.
@@ -57,5 +59,3 @@ pyinstaller --name VideoCompressor --onefile --noconsole compressor_gui.py
 
 ### Acknowledgements
 - Powered by FFmpeg (`ffmpeg` and `ffprobe`).
-
-

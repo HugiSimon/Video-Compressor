@@ -10,6 +10,41 @@ import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+#
+# GIF size estimation heuristic:
+# For GIFs, bitrate is not meaningful; estimate based on number of frames and pixel count.
+# est_bytes ≈ duration * effective_fps * effective_width * effective_height / 6.0 * 1.05
+#
+def estimate_gif_size_bytes(
+    duration_sec: float,
+    src_width: int | None,
+    src_height: int | None,
+    src_fps: float | None,
+    res_choice: str,
+    fps_choice: str,
+) -> int:
+    try:
+        effective_fps = float(int(fps_choice)) if fps_choice != "Source" else float(src_fps or 30.0)
+    except Exception:
+        effective_fps = float(src_fps or 30.0)
+
+    # Determine output height
+    if res_choice == "Source" or not src_width or not src_height:
+        out_h = int(src_height or 480)
+        base_w = int(src_width or 640)
+    else:
+        out_h = int(res_choice.replace("p", ""))
+        base_w = int(src_width)
+
+    # Compute output width keeping AR and making it mod 2, like the ffmpeg scale used
+    aspect = (float(base_w) / float(src_height or out_h)) if (src_height or out_h) else 1.0
+    out_w = int((out_h * aspect) // 2 * 2) or 2
+
+    frames = max(0.0, duration_sec) * max(1.0, effective_fps)
+    est = frames * float(out_w) * float(out_h) / 6.0
+    est *= 1.05  # container/overhead
+    return int(max(0, math.ceil(est)))
+
 
 def is_frozen() -> bool:
     return getattr(sys, "frozen", False) is True
@@ -165,12 +200,16 @@ class App(tk.Tk):
 
         self.input_path_var = tk.StringVar(value=initial_input or "")
         self.duration_sec: float = 0.0
+        self.src_width: int | None = None
+        self.src_height: int | None = None
+        self.src_fps: float | None = None
 
         # UI Variables
         self.resolution_var = tk.StringVar(value="Source")
         self.fps_var = tk.StringVar(value="Source")
         self.video_kbps_var = tk.IntVar(value=1500)
         self.include_audio_var = tk.BooleanVar(value=True)
+        self.format_var = tk.StringVar(value="MP4")
         self.estimate_label_var = tk.StringVar(value="Estimation taille maximale: -")
 
         self._build_ui()
@@ -213,17 +252,29 @@ class App(tk.Tk):
 
         # Video bitrate slider
         ttk.Label(settings, text="Vidéo kb/s").grid(row=1, column=0, sticky="w", padx=10, pady=6)
-        bitrate_scale = ttk.Scale(settings, from_=100, to=10000, orient="horizontal",
-                                  command=lambda v: self._on_bitrate_changed(v))
-        bitrate_scale.set(self.video_kbps_var.get())
-        bitrate_scale.grid(row=1, column=1, columnspan=3, sticky="ew", padx=10, pady=6)
+        self.bitrate_scale = ttk.Scale(settings, from_=100, to=10000, orient="horizontal",
+                                       command=lambda v: self._on_bitrate_changed(v))
+        self.bitrate_scale.set(self.video_kbps_var.get())
+        self.bitrate_scale.grid(row=1, column=1, columnspan=3, sticky="ew", padx=10, pady=6)
         self.bitrate_value_lbl = ttk.Label(settings, text=f"{self.video_kbps_var.get()} kb/s")
         self.bitrate_value_lbl.grid(row=1, column=4, sticky="w", padx=(0, 10), pady=6)
 
         # Include audio checkbox
-        audio_chk = ttk.Checkbutton(settings, text="Garder l'audio", variable=self.include_audio_var,
-                                    command=self._update_estimate)
-        audio_chk.grid(row=2, column=0, sticky="w", padx=10, pady=6)
+        self.audio_chk = ttk.Checkbutton(settings, text="Garder l'audio", variable=self.include_audio_var,
+                                         command=self._update_estimate)
+        self.audio_chk.grid(row=2, column=0, sticky="w", padx=10, pady=6)
+
+        # Format selector
+        ttk.Label(settings, text="Format").grid(row=2, column=2, sticky="w", padx=10, pady=6)
+        format_combo = ttk.Combobox(settings, state="readonly", textvariable=self.format_var,
+                                    values=["MP4", "MKV", "WEBM", "GIF"])
+        format_combo.grid(row=2, column=3, sticky="ew", padx=10, pady=6)
+        format_combo.bind("<<ComboboxSelected>>", lambda e: self._on_format_changed())
+
+        # GIF hint (hidden by default)
+        self.gif_hint_label = ttk.Label(settings, text="Pour GIF, le débit vidéo est ignoré; ajustez Résolution/FPS.")
+        self.gif_hint_label.grid(row=3, column=0, columnspan=5, sticky="w", padx=10, pady=(0, 6))
+        self.gif_hint_label.grid_remove()
 
         # Estimation label
         estimate_frame = ttk.Frame(self)
@@ -239,6 +290,9 @@ class App(tk.Tk):
         # Grid config
         settings.columnconfigure(1, weight=1)
         settings.columnconfigure(3, weight=1)
+
+        # Initialize format-dependent UI state
+        self._on_format_changed()
 
     def _choose_input(self) -> None:
         filetypes = [
@@ -269,18 +323,56 @@ class App(tk.Tk):
         try:
             info = probe_media(self.ffprobe_path, path)
             self.duration_sec = info.get("duration", 0.0) or 0.0
+            self.src_width = info.get("width")
+            self.src_height = info.get("height")
+            self.src_fps = info.get("fps")
         except Exception as exc:
             messagebox.showerror("Erreur d'analyse", str(exc))
             self.duration_sec = 0.0
+            self.src_width = None
+            self.src_height = None
+            self.src_fps = None
+        self._update_estimate()
+
+    def _on_format_changed(self) -> None:
+        fmt = (self.format_var.get() or "MP4").upper()
+        if fmt == "GIF":
+            # GIFs do not carry audio; force off and disable control
+            self.include_audio_var.set(False)
+            self.audio_chk.state(["disabled"])
+            self.gif_hint_label.grid()  # show
+            # Disable bitrate control for GIF
+            try:
+                self.bitrate_scale.state(["disabled"])
+            except Exception:
+                pass
+        else:
+            self.audio_chk.state(["!disabled"])
+            self.gif_hint_label.grid_remove()
+            try:
+                self.bitrate_scale.state(["!disabled"])
+            except Exception:
+                pass
         self._update_estimate()
 
     def _update_estimate(self) -> None:
         if not self.input_path_var.get() or self.duration_sec <= 0:
             self.estimate_label_var.set("Estimation taille maximale: -")
             return
-        video_kbps = self.video_kbps_var.get()
-        include_audio = self.include_audio_var.get()
-        est_bytes = compute_upper_bound_size_bytes(self.duration_sec, video_kbps, include_audio)
+        fmt = (self.format_var.get() or "MP4").upper()
+        if fmt == "GIF":
+            est_bytes = estimate_gif_size_bytes(
+                self.duration_sec,
+                self.src_width,
+                self.src_height,
+                self.src_fps,
+                self.resolution_var.get(),
+                self.fps_var.get(),
+            )
+        else:
+            video_kbps = self.video_kbps_var.get()
+            include_audio = self.include_audio_var.get()
+            est_bytes = compute_upper_bound_size_bytes(self.duration_sec, video_kbps, include_audio)
         self.estimate_label_var.set(f"Estimation taille maximale: {human_readable_size(est_bytes)}")
 
     def _build_ffmpeg_cmd(self, src: str, dst: str) -> list[str]:
@@ -288,6 +380,49 @@ class App(tk.Tk):
         chosen_video_kbps = max(50, int(video_kbps))
         planned_video_kbps = max(50, int(math.floor(chosen_video_kbps * 0.97)))
         include_audio = self.include_audio_var.get()
+
+        fmt = (self.format_var.get() or "MP4").upper()
+        dst_lower = (dst or "").lower()
+
+        # GIF branch: use palettegen + paletteuse
+        if fmt == "GIF" or dst_lower.endswith(".gif"):
+            pre_filters: list[str] = []
+
+            # Resolution scaling (keep aspect ratio, height fixed, width computed; ensure mod2)
+            res_choice = self.resolution_var.get()
+            if res_choice != "Source":
+                target_h = int(res_choice.replace("p", ""))
+                pre_filters.append(f"scale='trunc(oh*a/2)*2':{target_h}")
+
+            # FPS
+            fps_choice = self.fps_var.get()
+            if fps_choice != "Source":
+                try:
+                    r_value = int(fps_choice)
+                    pre_filters.insert(0, f"fps={r_value}")
+                except ValueError:
+                    pass
+
+            if pre_filters:
+                pre = ",".join(pre_filters)
+                fc = f"[0:v]{pre},split[v0][v1];[v0]palettegen=stats_mode=full[p];[v1][p]paletteuse=dither=bayer:bayer_scale=5"
+            else:
+                fc = "[0:v]split[v0][v1];[v0]palettegen=stats_mode=full[p];[v1][p]paletteuse=dither=bayer:bayer_scale=5"
+
+            cmd = [
+                self.ffmpeg_path,
+                "-y",
+                "-hide_banner",
+                "-v",
+                "warning",
+                "-i",
+                src,
+                "-filter_complex",
+                fc,
+                "-an",
+                dst,
+            ]
+            return cmd
 
         vf_filters: list[str] = []
 
@@ -321,6 +456,36 @@ class App(tk.Tk):
                 "-ar", "48000",
             ]
 
+        # Choose video codec and container-specific flags
+        if fmt == "WEBM" or dst_lower.endswith(".webm"):
+            vcodec_args = [
+                "-c:v", "libvpx-vp9",
+                "-pix_fmt", "yuv420p",
+                "-b:v", f"{planned_video_kbps}k",
+                "-maxrate", f"{chosen_video_kbps}k",
+                "-bufsize", f"{chosen_video_kbps * 2}k",
+                "-row-mt", "1",
+                "-deadline", "good",
+            ]
+            container_tail = []
+        else:
+            # MP4 / MKV default to H.264
+            vcodec_args = [
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-profile:v", "high",
+                "-preset", "medium",
+                "-b:v", f"{planned_video_kbps}k",
+                "-maxrate", f"{chosen_video_kbps}k",
+                "-bufsize", f"{chosen_video_kbps * 2}k",
+                "-x264-params", "nal-hrd=cbr:force-cfr=1",
+            ]
+            # faststart only for MP4/MOV
+            if dst_lower.endswith(".mp4") or dst_lower.endswith(".m4v") or dst_lower.endswith(".mov"):
+                container_tail = ["-movflags", "+faststart"]
+            else:
+                container_tail = []
+
         cmd = [
             self.ffmpeg_path,
             "-y",
@@ -331,16 +496,9 @@ class App(tk.Tk):
             src,
             *vf_args,
             *r_args,
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            "-profile:v", "high",
-            "-preset", "medium",
-            "-b:v", f"{planned_video_kbps}k",
-            "-maxrate", f"{chosen_video_kbps}k",
-            "-bufsize", f"{chosen_video_kbps * 2}k",
-            "-x264-params", "nal-hrd=cbr:force-cfr=1",
+            *vcodec_args,
             *audio_args,
-            "-movflags", "+faststart",
+            *container_tail,
             dst,
         ]
         return cmd
@@ -369,17 +527,37 @@ class App(tk.Tk):
         if self.fps_var.get() != "Source":
             parts.append(f"{self.fps_var.get()}fps")
         parts.append(f"{self.video_kbps_var.get()}kbps")
-        if not self.include_audio_var.get():
+        fmt = (self.format_var.get() or "MP4").upper()
+        if not self.include_audio_var.get() and fmt != "GIF":
             parts.append("noaudio")
         tag = "_" + "_".join(parts) if parts else "_compressed"
 
-        out_ext = src_path.suffix if src_path.suffix.lower() in {".mp4", ".m4v", ".mov", ".mkv", ".webm"} else ".mp4"
+        # Output extension by selected format
+        if fmt == "GIF":
+            out_ext = ".gif"
+        elif fmt == "MKV":
+            out_ext = ".mkv"
+        elif fmt == "WEBM":
+            out_ext = ".webm"
+        else:
+            out_ext = ".mp4"
+
         out_name = f"{src_path.stem}{tag}{out_ext}"
         out_path = unique_output_path(out_dir / out_name)
 
         # Confirm estimated max size before starting
         if self.duration_sec > 0:
-            max_bytes = compute_upper_bound_size_bytes(self.duration_sec, self.video_kbps_var.get(), self.include_audio_var.get())
+            if fmt == "GIF":
+                max_bytes = estimate_gif_size_bytes(
+                    self.duration_sec,
+                    self.src_width,
+                    self.src_height,
+                    self.src_fps,
+                    self.resolution_var.get(),
+                    self.fps_var.get(),
+                )
+            else:
+                max_bytes = compute_upper_bound_size_bytes(self.duration_sec, self.video_kbps_var.get(), self.include_audio_var.get())
             human = human_readable_size(max_bytes)
             if not messagebox.askokcancel("Confirmation", f"Taille maximale estimée: {human}\n\nContinuer ?"):
                 return
@@ -446,5 +624,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
