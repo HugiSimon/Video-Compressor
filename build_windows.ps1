@@ -42,7 +42,7 @@ $script = "compressor_gui.py"
   --name "VideoCompressor" `
   --onefile `
   --noconsole `
-  --add-data "$script;." `
+  --add-data "video_compressor;video_compressor" `
   $script
 
 Write-Host "EXE created at: dist/VideoCompressor.exe"
